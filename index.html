@@ -1,0 +1,231 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Dorm Meter Tracker</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
+<style>
+:root{--bg:#eef2f6;--card:#fff;--ink:#14213d;--mute:#5c6b80;--line:#d5dde7;--water:#1d6fd8;--power:#d98e04;--bad:#c8402b;--ok:#1f8a5b}
+@media (prefers-color-scheme:dark){:root{--bg:#0f1624;--card:#18223a;--ink:#e8edf5;--mute:#98a6bb;--line:#2b3957;--water:#5aa2ff;--power:#f2b134;--bad:#ff7a63;--ok:#4cc790}}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);font-family:system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;line-height:1.55}
+main{max-width:980px;margin:0 auto;padding:24px 16px 48px}
+h1{font-size:1.7rem;margin:0 0 4px}
+h2{font-size:1.1rem;margin:0 0 12px}
+.sub{color:var(--mute);margin:0 0 24px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:18px;margin-bottom:16px}
+.grid{display:grid;gap:16px;grid-template-columns:1fr 1fr}
+.grid .card{margin-bottom:0}
+@media(max-width:720px){.grid{grid-template-columns:1fr}}
+form,.row{display:flex;flex-wrap:wrap;gap:10px;align-items:flex-end}
+label{display:flex;flex-direction:column;font-size:.85rem;color:var(--mute);gap:4px}
+input,select,button{font:inherit;padding:8px 10px;border-radius:6px;border:1px solid var(--line);background:var(--card);color:var(--ink)}
+input{width:130px}
+button{cursor:pointer;background:var(--ink);color:var(--bg);border-color:var(--ink);font-weight:500}
+button.ghost{background:transparent;color:var(--ink)}
+button:focus-visible,input:focus-visible,select:focus-visible{outline:3px solid var(--water);outline-offset:2px}
+.msg{min-height:1.4em;margin:8px 0 0;font-size:.9rem;color:var(--bad)}
+.stats{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin:10px 0}
+.stat b{display:block;font-size:1.2rem}
+.stat span{font-size:.8rem;color:var(--mute)}
+.alert{padding:10px 12px;border-radius:6px;font-size:.92rem;margin-bottom:10px;border-left:5px solid var(--ok);background:color-mix(in srgb,var(--ok) 12%,transparent)}
+.alert.bad{border-color:var(--bad);background:color-mix(in srgb,var(--bad) 12%,transparent)}
+.alert.none{border-color:var(--line);background:transparent;color:var(--mute)}
+.chart{position:relative;height:200px}
+table{width:100%;border-collapse:collapse;font-size:.9rem}
+th,td{text-align:left;padding:6px 8px;border-bottom:1px solid var(--line)}
+td button{padding:2px 8px;font-size:.8rem}
+.scroll{max-height:260px;overflow-y:auto}
+.note{font-size:.8rem;color:var(--mute);margin:10px 0 0}
+</style>
+</head>
+<body>
+<main>
+  <h1>Dorm Meter Tracker</h1>
+  <p class="sub">Log your electricity and water meter readings. Find out you're overusing before the bill arrives.</p>
+
+  <section class="card">
+    <h2>Log a meter reading</h2>
+    <form id="addForm">
+      <label>Meter
+        <select id="type"><option value="power">Electricity (kWh)</option><option value="water">Water (m³)</option></select>
+      </label>
+      <label>Date <input type="date" id="date" required></label>
+      <label>Meter reading <input type="number" id="value" min="0" step="0.1" required></label>
+      <button type="submit">Save reading</button>
+    </form>
+    <p class="msg" id="msg" role="alert"></p>
+  </section>
+
+  <section class="card">
+    <h2>Settings</h2>
+    <div class="row">
+      <label>Currency symbol <input type="text" id="currency" maxlength="4" style="width:80px"></label>
+      <label>Electricity price per kWh <input type="number" id="ratePower" min="0" step="0.01"></label>
+      <label>Water price per m³ <input type="number" id="rateWater" min="0" step="0.01"></label>
+      <label>Warn when usage is above normal by (%) <input type="number" id="threshold" min="5" step="5"></label>
+      <button type="button" class="ghost" id="sample">Load sample data</button>
+      <button type="button" class="ghost" id="clear">Clear all data</button>
+    </div>
+    <p class="note">Check your utility bill for your real prices. Your data stays in this browser and is never uploaded.</p>
+  </section>
+
+  <div class="grid" id="cards"></div>
+
+  <section class="card" style="margin-top:16px">
+    <h2>Reading history</h2>
+    <div class="scroll"><table>
+      <thead><tr><th>Date</th><th>Meter</th><th>Reading</th><th></th></tr></thead>
+      <tbody id="history"></tbody>
+    </table></div>
+  </section>
+</main>
+
+<script>
+const KEY = "dorm-meter-v2";
+const LABEL = { power: "Electricity", water: "Water" };
+const UNIT = { power: "kWh", water: "m³" };
+const COLOR = { power: "#d98e04", water: "#1d6fd8" };
+let state = { readings: [], currency: "฿", ratePower: 8, rateWater: 18, threshold: 30 };
+const charts = {};
+
+function load() {
+  try { const s = JSON.parse(localStorage.getItem(KEY)); if (s && Array.isArray(s.readings)) state = Object.assign(state, s); } catch (e) {}
+}
+function save() {
+  try { localStorage.setItem(KEY, JSON.stringify(state)); } catch (e) {}
+}
+const $ = id => document.getElementById(id);
+const d2 = s => new Date(s + "T00:00");
+const days = (a, b) => Math.round((d2(b) - d2(a)) / 864e5);
+const fmtDate = s => d2(s).toLocaleDateString(undefined, { day: "numeric", month: "short" });
+const rate = t => t === "power" ? state.ratePower : state.rateWater;
+const money = n => state.currency + n.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+const num = (n, d = 1) => n.toLocaleString(undefined, { maximumFractionDigits: d });
+const iso = d => d.getFullYear() + "-" + String(d.getMonth() + 1).padStart(2, "0") + "-" + String(d.getDate()).padStart(2, "0");
+const esc = s => String(s).replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+
+function series(t) {
+  return state.readings.filter(r => r.type === t).sort((a, b) => a.date.localeCompare(b.date));
+}
+// usage for each interval between two consecutive readings
+function intervals(t) {
+  const s = series(t), out = [];
+  for (let i = 1; i < s.length; i++) {
+    const n = days(s[i - 1].date, s[i].date);
+    if (n > 0) out.push({ from: s[i - 1].date, to: s[i].date, days: n, used: s[i].value - s[i - 1].value, perDay: (s[i].value - s[i - 1].value) / n });
+  }
+  return out;
+}
+
+function analyse(t) {
+  const iv = intervals(t);
+  if (iv.length === 0) return null;
+  const last = iv[iv.length - 1], prev = iv.slice(0, -1).slice(-4);
+  const avgPrev = prev.length ? prev.reduce((a, x) => a + x.perDay, 0) / prev.length : null;
+  const over = avgPrev && avgPrev > 0 ? (last.perDay / avgPrev - 1) * 100 : null;
+  const recent = iv.slice(-3);
+  const recentPerDay = recent.reduce((a, x) => a + x.used, 0) / recent.reduce((a, x) => a + x.days, 0);
+  const now = new Date(), monthDays = new Date(now.getFullYear(), now.getMonth() + 1, 0).getDate();
+  return { iv, last, avgPrev, over, forecastCost: recentPerDay * monthDays * rate(t) };
+}
+
+function renderCard(t) {
+  const a = analyse(t), el = $("card-" + t), u = UNIT[t];
+  const head = `<h2 style="color:${COLOR[t]}">${LABEL[t]}</h2>`;
+  if (!a) {
+    el.innerHTML = head + `<div class="alert none">Log at least two readings to start the analysis.</div>`;
+    if (charts[t]) { charts[t].destroy(); delete charts[t]; }
+    return;
+  }
+  let alertHtml;
+  if (a.over === null) alertHtml = `<div class="alert none">Not enough earlier data to compare yet. Log one more reading.</div>`;
+  else if (a.over > state.threshold) alertHtml = `<div class="alert bad"><b>${LABEL[t]} use is ${Math.round(a.over)}% above normal.</b> From ${fmtDate(a.last.from)} to ${fmtDate(a.last.to)} you used ${num(a.last.perDay, 2)} ${u}/day, versus a usual ${num(a.avgPrev, 2)} ${u}/day. Check for ${t === "power" ? "an air conditioner or heater left on" : "a leaking tap or toilet"}.</div>`;
+  else alertHtml = `<div class="alert"><b>Normal usage.</b> Latest period: ${num(a.last.perDay, 2)} ${u}/day (${a.over >= 0 ? "+" : ""}${Math.round(a.over)}% vs. usual).</div>`;
+  el.innerHTML = head + alertHtml + `
+    <div class="stats">
+      <div class="stat"><b>${num(a.last.used)} ${u}</b><span>Used in latest period</span></div>
+      <div class="stat"><b>${money(a.last.used * rate(t))}</b><span>Cost of latest period</span></div>
+      <div class="stat"><b>${money(a.forecastCost)}</b><span>Estimated monthly bill</span></div>
+    </div>
+    <div class="chart"><canvas id="ch-${t}" aria-label="${LABEL[t]} use per day" role="img"></canvas></div>`;
+  if (typeof Chart === "undefined") return;
+  if (charts[t]) charts[t].destroy();
+  const ivs = a.iv.slice(-8);
+  charts[t] = new Chart($("ch-" + t), {
+    type: "bar",
+    data: {
+      labels: ivs.map(x => fmtDate(x.to)),
+      datasets: [{
+        label: u + " per day",
+        data: ivs.map(x => +x.perDay.toFixed(3)),
+        backgroundColor: ivs.map((x, i) => (i === ivs.length - 1 && a.over > state.threshold) ? "#c8402b" : COLOR[t])
+      }]
+    },
+    options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { display: false } }, scales: { y: { beginAtZero: true, title: { display: true, text: u + " per day" } } } }
+  });
+}
+
+function renderHistory() {
+  const rows = [...state.readings].sort((a, b) => b.date.localeCompare(a.date) || a.type.localeCompare(b.type));
+  $("history").innerHTML = rows.length
+    ? rows.map(r => `<tr><td>${fmtDate(r.date)}</td><td>${LABEL[r.type]}</td><td>${num(r.value, 2)} ${UNIT[r.type]}</td><td><button class="ghost" data-id="${esc(r.id)}" aria-label="Delete reading">Delete</button></td></tr>`).join("")
+    : `<tr><td colspan="4" style="color:var(--mute)">No readings yet. Add one above or click "Load sample data".</td></tr>`;
+}
+
+function renderAll() {
+  renderCard("power"); renderCard("water"); renderHistory();
+  $("currency").value = state.currency; $("ratePower").value = state.ratePower; $("rateWater").value = state.rateWater; $("threshold").value = state.threshold;
+}
+
+$("addForm").addEventListener("submit", e => {
+  e.preventDefault();
+  const type = $("type").value, date = $("date").value, value = parseFloat($("value").value);
+  const msg = $("msg"); msg.textContent = "";
+  if (!date || isNaN(value)) { msg.textContent = "Enter both a date and a meter reading."; return; }
+  const s = series(type);
+  if (s.some(r => r.date === date)) { msg.textContent = `You already logged ${LABEL[type].toLowerCase()} for this date. Delete the old reading to change it.`; return; }
+  const before = [...s].reverse().find(r => r.date < date), after = s.find(r => r.date > date);
+  if (before && value < before.value) { msg.textContent = `Reading can't be lower than the previous one (${before.value} on ${fmtDate(before.date)}).`; return; }
+  if (after && value > after.value) { msg.textContent = `Reading can't be higher than the next one (${after.value} on ${fmtDate(after.date)}).`; return; }
+  state.readings.push({ id: Date.now() + Math.random().toString(16).slice(2), type, date, value });
+  save(); $("value").value = ""; renderAll();
+});
+
+$("history").addEventListener("click", e => {
+  const id = e.target.dataset && e.target.dataset.id;
+  if (!id) return;
+  state.readings = state.readings.filter(r => r.id !== id);
+  save(); renderAll();
+});
+
+$("currency").addEventListener("change", () => { state.currency = $("currency").value.trim() || "฿"; save(); renderAll(); });
+[["ratePower", "ratePower"], ["rateWater", "rateWater"], ["threshold", "threshold"]].forEach(([id, k]) =>
+  $(id).addEventListener("change", () => { const v = parseFloat($(id).value); if (v > 0) { state[k] = v; save(); } renderAll(); }));
+
+$("sample").addEventListener("click", () => {
+  const base = new Date(); base.setDate(base.getDate() - 35);
+  const powerPerDay = [5.5, 5.8, 5.2, 5.6, 9.4];   // last week spikes (AC left on)
+  const waterPerDay = [0.35, 0.3, 0.4, 0.33, 0.36];
+  let p = 1200, w = 85; const out = [];
+  out.push({ type: "power", date: iso(base), value: p }, { type: "water", date: iso(base), value: w });
+  for (let i = 0; i < 5; i++) {
+    const d = new Date(base); d.setDate(d.getDate() + 7 * (i + 1));
+    p += powerPerDay[i] * 7; w += waterPerDay[i] * 7;
+    out.push({ type: "power", date: iso(d), value: +p.toFixed(1) }, { type: "water", date: iso(d), value: +w.toFixed(2) });
+  }
+  state.readings = out.map((r, i) => Object.assign({ id: "s" + i }, r));
+  save(); renderAll();
+});
+
+$("clear").addEventListener("click", () => {
+  if (confirm("Delete all meter readings?")) { state.readings = []; save(); renderAll(); }
+});
+
+$("cards").innerHTML = '<section class="card" id="card-power"></section><section class="card" id="card-water"></section>';
+$("date").value = iso(new Date());
+load(); renderAll();
+</script>
+</body>
+</html>
